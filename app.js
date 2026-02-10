@@ -6,8 +6,9 @@ dotenv.config();
 
 const app = express();
 
-// 1. Buat koneksi pool di luar (agar bisa dipakai berulang kali)
-// Konfigurasi diambil dari file .env
+// ============================================================
+// DATABASE
+// ============================================================
 const db = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
   port: parseInt(process.env.DB_PORT) || 3306,
@@ -19,78 +20,50 @@ const db = mysql.createPool({
   queueLimit: 0
 });
 
+// ============================================================
+// CONSTANTS
+// ============================================================
+const STATUS_ORDER = ['Registrasi', 'Akomodasi', 'Ralan', 'Ranap', 'Retur'];
 
-const SQL_BILLING_TINDAKAN_RANAP_PETUGAS = `
+// ============================================================
+// SQL QUERIES
+// ============================================================
+
+const SQL_REGISTRASI = `
 SELECT
-    jpi.nm_perawatan AS nama_brng,
-    rip.biaya_rawat AS biaya_obat,
-    COUNT(*) AS jml,
+    'Registrasi' AS nama_brng,
+    rp.biaya_reg AS biaya_obat,
+    1 AS jml,
     0 AS embalase,
     0 AS tuslah,
-    SUM(rip.biaya_rawat) AS total,
-    'Ranap' AS status,
-    kp.nm_kategori AS jenis
-  FROM rawat_inap_pr rip
-  JOIN jns_perawatan_inap jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
-  JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
-  WHERE rip.no_rawat = ?
-  GROUP BY
-      rip.no_rawat,
-      rip.kd_jenis_prw,
-      rip.biaya_rawat,
-      jpi.nm_perawatan,
-      kp.nm_kategori
-  ORDER BY status, nama_brng;
+    rp.biaya_reg AS total,
+    'Registrasi' AS status,
+    pj.png_jawab AS jenis
+FROM reg_periksa rp
+JOIN penjab pj ON rp.kd_pj = pj.kd_pj
+WHERE rp.no_rawat = ?
 `;
 
-const SQL_BILLING_TINDAKAN_RANAP_DOKTER = `
+const SQL_BILLING_KAMAR = `
 SELECT
-    jpi.nm_perawatan AS nama_brng,
-    rip.biaya_rawat AS biaya_obat,
-    COUNT(*) AS jml,
+    CONCAT(ki.kd_kamar, ' - ', b.nm_bangsal) AS nama_brng,
+    ki.trf_kamar AS biaya_obat,
+    ki.lama AS jml,
     0 AS embalase,
     0 AS tuslah,
-    SUM(rip.biaya_rawat) AS total,
-    'Ranap' AS status,
-    kp.nm_kategori AS jenis
-  FROM rawat_inap_dr rip
-  JOIN jns_perawatan_inap jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
-  JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
-  WHERE rip.no_rawat = ?
-  GROUP BY
-      rip.no_rawat,
-      rip.kd_jenis_prw,
-      rip.biaya_rawat,
-      jpi.nm_perawatan,
-      kp.nm_kategori
-  ORDER BY status, nama_brng;
+    ki.ttl_biaya AS total,
+    'Akomodasi' AS status,
+    'Kamar' AS jenis
+FROM kamar_inap ki
+JOIN kamar k      ON ki.kd_kamar = k.kd_kamar
+JOIN bangsal b    ON k.kd_bangsal = b.kd_bangsal
+WHERE ki.no_rawat = ?
+ORDER BY ki.tgl_masuk, ki.kd_kamar;
 `;
 
-const SQL_BILLING_TINDAKAN_RANAP_DOKTER_PETUGAS = `
-SELECT
-    jpi.nm_perawatan AS nama_brng,
-    rip.biaya_rawat AS biaya_obat,
-    COUNT(*) AS jml,
-    0 AS embalase,
-    0 AS tuslah,
-    SUM(rip.biaya_rawat) AS total,
-    'Ranap' AS status,
-    kp.nm_kategori AS jenis
-  FROM rawat_inap_drpr rip
-  JOIN jns_perawatan_inap jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
-  JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
-  WHERE rip.no_rawat = ?
-  GROUP BY
-      rip.no_rawat,
-      rip.kd_jenis_prw,
-      rip.biaya_rawat,
-      jpi.nm_perawatan,
-      kp.nm_kategori
-  ORDER BY status, nama_brng;
-`;
-
-const SQL_BILLING_TINDAKAN_RALAN_PETUGAS = `
-SELECT
+const SQL_BILLING_TINDAKAN_RALAN = `
+SELECT nama_brng, biaya_obat, jml, embalase, tuslah, total, status, jenis FROM (
+  SELECT
     jpi.nm_perawatan AS nama_brng,
     rip.biaya_rawat AS biaya_obat,
     COUNT(*) AS jml,
@@ -103,18 +76,11 @@ SELECT
   JOIN jns_perawatan jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
   JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
   WHERE rip.no_rawat = ?
-  GROUP BY
-      rip.no_rawat,
-      rip.kd_jenis_prw,
-      rip.biaya_rawat,
-      jpi.nm_perawatan,
-      kp.nm_kategori
-  ORDER BY status, nama_brng;
-`;
+  GROUP BY rip.no_rawat, rip.kd_jenis_prw, rip.biaya_rawat, jpi.nm_perawatan, kp.nm_kategori
 
+  UNION ALL
 
-const SQL_BILLING_TINDAKAN_RALAN_DOKTER = `
-SELECT
+  SELECT
     jpi.nm_perawatan AS nama_brng,
     rip.biaya_rawat AS biaya_obat,
     COUNT(*) AS jml,
@@ -127,18 +93,11 @@ SELECT
   JOIN jns_perawatan jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
   JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
   WHERE rip.no_rawat = ?
-  GROUP BY
-      rip.no_rawat,
-      rip.kd_jenis_prw,
-      rip.biaya_rawat,
-      jpi.nm_perawatan,
-      kp.nm_kategori
-  ORDER BY status, nama_brng;
-`;
+  GROUP BY rip.no_rawat, rip.kd_jenis_prw, rip.biaya_rawat, jpi.nm_perawatan, kp.nm_kategori
 
+  UNION ALL
 
-const SQL_BILLING_TINDAKAN_RALAN_DOKTER_PETUGAS = `
-SELECT
+  SELECT
     jpi.nm_perawatan AS nama_brng,
     rip.biaya_rawat AS biaya_obat,
     COUNT(*) AS jml,
@@ -151,13 +110,61 @@ SELECT
   JOIN jns_perawatan jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
   JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
   WHERE rip.no_rawat = ?
-  GROUP BY
-      rip.no_rawat,
-      rip.kd_jenis_prw,
-      rip.biaya_rawat,
-      jpi.nm_perawatan,
-      kp.nm_kategori
-  ORDER BY status, nama_brng;
+  GROUP BY rip.no_rawat, rip.kd_jenis_prw, rip.biaya_rawat, jpi.nm_perawatan, kp.nm_kategori
+) x ORDER BY jenis, nama_brng;
+`;
+
+const SQL_BILLING_TINDAKAN_RANAP = `
+SELECT nama_brng, biaya_obat, jml, embalase, tuslah, total, status, jenis FROM (
+  SELECT
+    jpi.nm_perawatan AS nama_brng,
+    rip.biaya_rawat AS biaya_obat,
+    COUNT(*) AS jml,
+    0 AS embalase,
+    0 AS tuslah,
+    SUM(rip.biaya_rawat) AS total,
+    'Ranap' AS status,
+    kp.nm_kategori AS jenis
+  FROM rawat_inap_pr rip
+  JOIN jns_perawatan_inap jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
+  JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
+  WHERE rip.no_rawat = ?
+  GROUP BY rip.no_rawat, rip.kd_jenis_prw, rip.biaya_rawat, jpi.nm_perawatan, kp.nm_kategori
+
+  UNION ALL
+
+  SELECT
+    jpi.nm_perawatan AS nama_brng,
+    rip.biaya_rawat AS biaya_obat,
+    COUNT(*) AS jml,
+    0 AS embalase,
+    0 AS tuslah,
+    SUM(rip.biaya_rawat) AS total,
+    'Ranap' AS status,
+    kp.nm_kategori AS jenis
+  FROM rawat_inap_dr rip
+  JOIN jns_perawatan_inap jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
+  JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
+  WHERE rip.no_rawat = ?
+  GROUP BY rip.no_rawat, rip.kd_jenis_prw, rip.biaya_rawat, jpi.nm_perawatan, kp.nm_kategori
+
+  UNION ALL
+
+  SELECT
+    jpi.nm_perawatan AS nama_brng,
+    rip.biaya_rawat AS biaya_obat,
+    COUNT(*) AS jml,
+    0 AS embalase,
+    0 AS tuslah,
+    SUM(rip.biaya_rawat) AS total,
+    'Ranap' AS status,
+    kp.nm_kategori AS jenis
+  FROM rawat_inap_drpr rip
+  JOIN jns_perawatan_inap jpi ON rip.kd_jenis_prw = jpi.kd_jenis_prw
+  JOIN kategori_perawatan kp ON jpi.kd_kategori = kp.kd_kategori
+  WHERE rip.no_rawat = ?
+  GROUP BY rip.no_rawat, rip.kd_jenis_prw, rip.biaya_rawat, jpi.nm_perawatan, kp.nm_kategori
+) x ORDER BY jenis, nama_brng;
 `;
 
 const SQL_BILLING_OBAT = `
@@ -202,13 +209,214 @@ SELECT
     0 as tuslah,
     pr.biaya as total,
     pr.status,
-		CONCAT("LABORATORIUM ",pr.kategori) AS jenis
+    CONCAT("LABORATORIUM ",pr.kategori) AS jenis
   FROM periksa_lab pr
   JOIN jns_perawatan_lab jpr ON pr.kd_jenis_prw = jpr.kd_jenis_prw
   WHERE pr.no_rawat = ? 
   ORDER BY pr.status, jpr.nm_perawatan
 `;
 
+const SQL_BILLING_OPERASI = `
+SELECT
+    nm_perawatan AS nama_brng,
+    biaya as biaya_obat,
+    1 AS jml,
+    0 AS embalase,
+    0 AS tuslah,
+    biaya AS total,
+    status,
+    jenis
+FROM (
+    SELECT
+        po.nm_perawatan,
+        (
+            COALESCE(o.biayaoperator1,0)+COALESCE(o.biayaoperator2,0)+COALESCE(o.biayaoperator3,0)+
+            COALESCE(o.biayaasisten_operator1,0)+COALESCE(o.biayaasisten_operator2,0)+COALESCE(o.biayaasisten_operator3,0)+
+            COALESCE(o.biayainstrumen,0)+COALESCE(o.biayadokter_anak,0)+COALESCE(o.biayaperawaat_resusitas,0)+
+            COALESCE(o.biayadokter_anestesi,0)+COALESCE(o.biayaasisten_anestesi,0)+COALESCE(o.biayaasisten_anestesi2,0)+
+            COALESCE(o.biayabidan,0)+COALESCE(o.biayabidan2,0)+COALESCE(o.biayabidan3,0)+COALESCE(o.biayaperawat_luar,0)+
+            COALESCE(o.biayaalat,0)+COALESCE(o.biayasewaok,0)+COALESCE(o.akomodasi,0)+COALESCE(o.bagian_rs,0)+
+            COALESCE(o.biaya_omloop,0)+COALESCE(o.biaya_omloop2,0)+COALESCE(o.biaya_omloop3,0)+COALESCE(o.biaya_omloop4,0)+
+            COALESCE(o.biaya_omloop5,0)+COALESCE(o.biayasarpras,0)+COALESCE(o.biaya_dokter_pjanak,0)+COALESCE(o.biaya_dokter_umum,0)
+        ) AS biaya,
+        o.status,
+        "OPERASI" AS jenis
+    FROM operasi o
+    JOIN paket_operasi po ON o.kode_paket = po.kode_paket
+    WHERE o.no_rawat = ?
+) x;
+`;
+
+const SQL_RETUR_OBAT = `
+SELECT
+    'Retur Obat' AS nama_brng,
+    SUM(drj.subtotal) * -1 AS biaya_obat,
+    1 AS jml,
+    0 AS embalase,
+    0 AS tuslah,
+    SUM(drj.subtotal) * -1 AS total,
+    'Retur' AS status,
+    'Obat' AS jenis
+FROM detreturjual drj
+JOIN returjual rj ON rj.no_retur_jual = drj.no_retur_jual
+WHERE rj.no_retur_jual LIKE ?
+`;
+
+// ============================================================
+// QUERY REGISTRY
+// Tambah query baru? Cukup tambahkan entry di sini.
+// ============================================================
+const BILLING_QUERIES = [
+  { sql: SQL_REGISTRASI,             params: nr => [nr] },
+  { sql: SQL_BILLING_KAMAR,          params: nr => [nr] },
+  { sql: SQL_BILLING_TINDAKAN_RALAN, params: nr => [nr, nr, nr] },
+  { sql: SQL_BILLING_TINDAKAN_RANAP, params: nr => [nr, nr, nr] },
+  { sql: SQL_BILLING_OBAT,           params: nr => [nr] },
+  { sql: SQL_BILLING_RADIOLOGI,      params: nr => [nr] },
+  { sql: SQL_BILLING_LABORATORIUM,   params: nr => [nr] },
+  { sql: SQL_BILLING_OPERASI,        params: nr => [nr] },
+  { sql: SQL_RETUR_OBAT,             params: nr => [`%${nr}%`] },
+];
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+/**
+ * Eksekusi semua billing queries secara paralel,
+ * return flat array of billing items.
+ */
+async function fetchBillingItems(no_rawat) {
+  const results = await Promise.all(
+    BILLING_QUERIES.map(q => db.execute(q.sql, q.params(no_rawat)))
+  );
+  // Setiap result = [rows, fields], ambil rows (index 0) lalu flatten
+  return results.flatMap(([rows]) => rows);
+}
+
+/**
+ * Group items berdasarkan Status → Jenis.
+ * Return { grouped, grand_total }
+ */
+function groupByStatus(items) {
+  const grouped = {};
+  let grand_total = 0;
+
+  for (const item of items) {
+    const statusKey = item.status || "Lainnya";
+    const jenisKey = item.jenis || "Lainnya";
+
+    if (!grouped[statusKey]) grouped[statusKey] = {};
+    if (!grouped[statusKey][jenisKey]) grouped[statusKey][jenisKey] = { items: [], subtotal: 0 };
+
+    grouped[statusKey][jenisKey].items.push(item);
+    grouped[statusKey][jenisKey].subtotal += Number(item.total);
+    grand_total += Number(item.total);
+  }
+
+  return { grouped, grand_total };
+}
+
+/**
+ * Urutkan status sesuai STATUS_ORDER.
+ * Status yang tidak ada di ORDER ditambahkan di akhir.
+ * Status tanpa data di-skip.
+ */
+function getOrderedStatuses(grouped) {
+  const ordered = STATUS_ORDER.filter(s => grouped[s]);
+  for (const s of Object.keys(grouped)) {
+    if (!ordered.includes(s)) ordered.push(s);
+  }
+  return ordered;
+}
+
+/**
+ * Render HTML billing lengkap.
+ */
+function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, jsonResponse) {
+  let htmlContent = "";
+
+  for (const status of orderedStatuses) {
+    const jenisMap = grouped[status];
+    let statusSubtotal = 0;
+    let jenisHtml = "";
+
+    for (const [jenis, data] of Object.entries(jenisMap)) {
+      statusSubtotal += data.subtotal;
+      jenisHtml += `
+        <details style="margin-left: 20px; margin-bottom: 8px;">
+          <summary style="cursor: pointer; padding: 8px; background: #e9e9e9; border-radius: 4px;">
+            <strong>${jenis}</strong> — Subtotal: <span style="color: green; font-weight: bold;">Rp ${data.subtotal.toLocaleString()}</span> (${data.items.length} item)
+          </summary>
+          <table style="width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 14px;">
+            <thead>
+              <tr style="background: #f5f5f5;">
+                <th style="border: 1px solid #ccc; padding: 6px;">Nama</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Biaya</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: center;">Jml</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Tambahan</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${data.items.map(r => `
+                <tr>
+                  <td style="border: 1px solid #ccc; padding: 6px;">${r.nama_brng}</td>
+                  <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.biaya_obat).toLocaleString()}</td>
+                  <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">${r.jml}</td>
+                  <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${r.embalase + r.tuslah}</td>
+                  <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.total).toLocaleString()}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </details>
+      `;
+    }
+
+    htmlContent += `
+      <details style="margin-bottom: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 10px;">
+        <summary style="cursor: pointer; font-size: 18px; font-weight: bold; padding: 8px; background: #d0e8ff; border-radius: 4px;">
+          Status: ${status} — Total: <span style="color: blue;">Rp ${statusSubtotal.toLocaleString()}</span>
+        </summary>
+        <div style="margin-top: 10px;">
+          ${jenisHtml}
+        </div>
+      </details>
+    `;
+  }
+
+  return `
+    <html>
+    <head>
+      <title>Billing: ${no_rawat}</title>
+      <style>
+        body { font-family: 'Segoe UI', sans-serif; padding: 20px; background: #f9f9f9; }
+        h2 { color: #333; }
+        .grand-total { font-size: 22px; margin-top: 20px; padding: 15px; background: #333; color: #fff; border-radius: 6px; }
+      </style>
+    </head>
+    <body>
+      <h2>Billing: ${no_rawat}</h2>
+      ${htmlContent}
+      <div class="grand-total">
+        Grand Total: Rp ${grand_total.toLocaleString()}
+      </div>
+      <hr/>
+      <details>
+        <summary>Lihat JSON Response</summary>
+        <pre>${JSON.stringify(jsonResponse, null, 2)}</pre>
+      </details>
+    </body>
+    </html>
+  `;
+}
+
+// ============================================================
+// ROUTES
+// ============================================================
+
+// Endpoint 1: /billing?no_rawat=... — HTML (browser) atau JSON (API)
 app.get("/billing", async (req, res) => {
   const { no_rawat } = req.query;
 
@@ -217,201 +425,56 @@ app.get("/billing", async (req, res) => {
   }
 
   try {
-    // 3. EKSEKUSI PARALEL (Tips: Promise.all biar cepat)
-    // PENTING: Destructure 8 variabel untuk 8 query!
-    const [
-      rowsTindakanRanapPetugas,
-      rowsTindakanRanapDokter,
-      rowsTindakanRanapDokterPetugas,
-      rowsTindakanRalanPetugas,
-      rowsTindakanRalanDokter,
-      rowsTindakanRalanDokterPetugas,
-      rowsObat,
-      rowsRadiologi,
-      rowsLaboratorium
-    ] = await Promise.all([
-      db.execute(SQL_BILLING_TINDAKAN_RANAP_PETUGAS, [no_rawat]),
-      db.execute(SQL_BILLING_TINDAKAN_RANAP_DOKTER, [no_rawat]),
-      db.execute(SQL_BILLING_TINDAKAN_RANAP_DOKTER_PETUGAS, [no_rawat]),
-      db.execute(SQL_BILLING_TINDAKAN_RALAN_PETUGAS, [no_rawat]),
-      db.execute(SQL_BILLING_TINDAKAN_RALAN_DOKTER, [no_rawat]),
-      db.execute(SQL_BILLING_TINDAKAN_RALAN_DOKTER_PETUGAS, [no_rawat]),
-      db.execute(SQL_BILLING_OBAT, [no_rawat]),
-      db.execute(SQL_BILLING_RADIOLOGI, [no_rawat]),
-      db.execute(SQL_BILLING_LABORATORIUM, [no_rawat])
-    ]); 
+    const allItems = await fetchBillingItems(no_rawat);
+    const { grouped, grand_total } = groupByStatus(allItems);
+    const orderedStatuses = getOrderedStatuses(grouped);
 
-    // Ambil hasil rows saja (index ke-0 dari return value execute)
-    const itemsTindakanRanapPetugas = rowsTindakanRanapPetugas[0];
-    const itemsTindakanRanapDokter = rowsTindakanRanapDokter[0];
-    const itemsTindakanRanapDokterPetugas = rowsTindakanRanapDokterPetugas[0];
-    const itemsTindakanRalanPetugas = rowsTindakanRalanPetugas[0];
-    const itemsTindakanRalanDokter = rowsTindakanRalanDokter[0];
-    const itemsTindakanRalanDokterPetugas = rowsTindakanRalanDokterPetugas[0];
-    const itemsObat = rowsObat[0];
-    const itemsRadiologi = rowsRadiologi[0];
-    const itemsLaboratorium = rowsLaboratorium[0];
+    const jsonResponse = { no_rawat, items: allItems, grand_total };
 
-    // 4. GABUNGKAN HASIL (Javascript Join)
-    const allItems = [...itemsTindakanRanapPetugas, ...itemsTindakanRanapDokter, ...itemsTindakanRanapDokterPetugas, ...itemsTindakanRalanPetugas, ...itemsTindakanRalanDokter, ...itemsTindakanRalanDokterPetugas, ...itemsObat, ...itemsRadiologi, ...itemsLaboratorium];
-
-    const grand_total = allItems.reduce(
-      (sum, r) => sum + Number(r.total),
-      0
-    );
-
-    const response = {
-      no_rawat,
-      items: allItems,
-      grand_total
-    };
-
-    // ====== GROUPING: Status -> Jenis ======
-    const grouped = {};
-    for (const item of allItems) {
-      const statusKey = item.status || "Lainnya";
-      const jenisKey = item.jenis || "Lainnya";
-      if (!grouped[statusKey]) grouped[statusKey] = {};
-      if (!grouped[statusKey][jenisKey]) grouped[statusKey][jenisKey] = { items: [], subtotal: 0 };
-      grouped[statusKey][jenisKey].items.push(item);
-      grouped[statusKey][jenisKey].subtotal += Number(item.total);
-    }
-
-    // ====== TAMPILAN UNTUK MANUSIA (Browser) ======
+    // Tampilan HTML untuk browser
     if (req.headers.accept?.includes("text/html")) {
-      // Build collapsible HTML
-      let htmlContent = "";
-      for (const [status, jenisMap] of Object.entries(grouped)) {
-        let statusSubtotal = 0;
-        let jenisHtml = "";
-        for (const [jenis, data] of Object.entries(jenisMap)) {
-          statusSubtotal += data.subtotal;
-          jenisHtml += `
-            <details style="margin-left: 20px; margin-bottom: 8px;">
-              <summary style="cursor: pointer; padding: 8px; background: #e9e9e9; border-radius: 4px;">
-                <strong>${jenis}</strong> — Subtotal: <span style="color: green; font-weight: bold;">Rp ${data.subtotal.toLocaleString()}</span> (${data.items.length} item)
-              </summary>
-              <table style="width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 14px;">
-                <thead>
-                  <tr style="background: #f5f5f5;">
-                    <th style="border: 1px solid #ccc; padding: 6px;">Nama</th>
-                    <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Biaya</th>
-                    <th style="border: 1px solid #ccc; padding: 6px; text-align: center;">Jml</th>
-                    <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Tambahan</th>
-                    <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${data.items.map(r => `
-                    <tr>
-                      <td style="border: 1px solid #ccc; padding: 6px;">${r.nama_brng}</td>
-                      <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.biaya_obat).toLocaleString()}</td>
-                      <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">${r.jml}</td>
-                      <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${r.embalase+r.tuslah}</td>
-                      <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.total).toLocaleString()}</td>
-                    </tr>
-                  `).join("")}
-                </tbody>
-              </table>
-            </details>
-          `;
-        }
-        htmlContent += `
-          <details style="margin-bottom: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 10px;">
-            <summary style="cursor: pointer; font-size: 18px; font-weight: bold; padding: 8px; background: #d0e8ff; border-radius: 4px;">
-              Status: ${status} — Total: <span style="color: blue;">Rp ${statusSubtotal.toLocaleString()}</span>
-            </summary>
-            <div style="margin-top: 10px;">
-              ${jenisHtml}
-            </div>
-          </details>
-        `;
-      }
-
-      return res.send(`
-        <html>
-        <head>
-          <title>Billing: ${no_rawat}</title>
-          <style>
-            body { font-family: 'Segoe UI', sans-serif; padding: 20px; background: #f9f9f9; }
-            h2 { color: #333; }
-            .grand-total { font-size: 22px; margin-top: 20px; padding: 15px; background: #333; color: #fff; border-radius: 6px; }
-          </style>
-        </head>
-        <body>
-          <h2>Billing: ${no_rawat}</h2>
-          ${htmlContent}
-          <div class="grand-total">
-            Grand Total: Rp ${grand_total.toLocaleString()}
-          </div>
-          <hr/>
-          <details>
-            <summary>Lihat JSON Response</summary>
-            <pre>${JSON.stringify(response, null, 2)}</pre>
-          </details>
-        </body>
-        </html>
-      `);
+      return res.send(renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, jsonResponse));
     }
 
-    // ====== RESPONSE API (JSON) ======
-    res.json(response);
-    
+    // Response JSON untuk API
+    res.json(jsonResponse);
+
   } catch (error) {
     console.error(error);
     res.status(500).send("Terjadi kesalahan pada server: " + error.message);
   }
 });
 
+// Endpoint 2: /billing/:no_rawat — JSON grouped by status
 app.get("/billing/:no_rawat", async (req, res) => {
   const { no_rawat } = req.params;
 
   try {
-     // Gunakan teknik yang sama untuk endpoint ini (Parallel + Combine)
-    const [rowsTindakanRanapPetugas] = await db.execute(SQL_BILLING_TINDAKAN_RANAP_PETUGAS, [no_rawat]);
-    const [rowsTindakanRanapDokter] = await db.execute(SQL_BILLING_TINDAKAN_RANAP_DOKTER, [no_rawat]);
-    const [rowsTindakanRanapDokterPetugas] = await db.execute(SQL_BILLING_TINDAKAN_RANAP_DOKTER_PETUGAS, [no_rawat]);
-    const [rowsTindakanRalanPetugas] = await db.execute(SQL_BILLING_TINDAKAN_RALAN_PETUGAS, [no_rawat]);
-    const [rowsTindakanRalanDokter] = await db.execute(SQL_BILLING_TINDAKAN_RALAN_DOKTER, [no_rawat]);
-    const [rowsTindakanRalanDokterPetugas] = await db.execute(SQL_BILLING_TINDAKAN_RALAN_DOKTER_PETUGAS, [no_rawat]);
-    const [rowsObat] = await db.execute(SQL_BILLING_OBAT, [no_rawat]);
-    const [rowsRadiologi] = await db.execute(SQL_BILLING_RADIOLOGI, [no_rawat]);
-    const [rowsLaboratorium] = await db.execute(SQL_BILLING_LABORATORIUM, [no_rawat]);
-    
-    // Gabung hasil
-    const allRows = [...rowsTindakanRanapPetugas, ...rowsTindakanRanapDokter, ...rowsTindakanRanapDokterPetugas, ...rowsTindakanRalanPetugas, ...rowsTindakanRalanDokter, ...rowsTindakanRalanDokterPetugas, ...rowsObat, ...rowsRadiologi, ...rowsLaboratorium];
+    const allItems = await fetchBillingItems(no_rawat);
+    const { grouped, grand_total } = groupByStatus(allItems);
+    const orderedStatuses = getOrderedStatuses(grouped);
 
-    const groupsMap = {};
-    let grand_total = 0;
-
-    for (const r of allRows) {
-      if (!groupsMap[r.status]) {
-        groupsMap[r.status] = {
-          status: r.status,
-          items: [],
-          subtotal: 0
-        };
+    // Format response: groups = array of { status, items[], subtotal }
+    const groups = orderedStatuses.map(status => {
+      const jenisMap = grouped[status];
+      const items = [];
+      let subtotal = 0;
+      for (const [jenis, data] of Object.entries(jenisMap)) {
+        for (const item of data.items) {
+          items.push({
+            nama: item.nama_brng,
+            jenis: item.jenis,
+            jumlah: item.jml,
+            biaya: item.biaya_obat,
+            total: item.total
+          });
+        }
+        subtotal += data.subtotal;
       }
+      return { status, items, subtotal };
+    });
 
-      groupsMap[r.status].items.push({
-        nama: r.nama_brng,
-        jenis: r.jenis,
-        jumlah: r.jml,
-        biaya: r.biaya_obat,
-        total: r.total
-      });
-
-      groupsMap[r.status].subtotal += Number(r.total); 
-      grand_total += Number(r.total);
-    }
-
-    const response = {
-      no_rawat,
-      groups: Object.values(groupsMap),
-      grand_total
-    };
-
-    res.json(response);
+    res.json({ no_rawat, groups, grand_total });
 
   } catch (error) {
     console.error(error);
@@ -419,6 +482,9 @@ app.get("/billing/:no_rawat", async (req, res) => {
   }
 });
 
+// ============================================================
+// START SERVER
+// ============================================================
 app.listen(3000, () => {
   console.log("Server berjalan di port 3000");
   console.log("Coba buka: http://localhost:3000/billing?no_rawat=...");
