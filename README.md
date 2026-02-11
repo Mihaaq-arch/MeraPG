@@ -1,5 +1,8 @@
 # MeraPG Billing API
 
+> **Blueprint / Prototype** — Node.js prototype untuk logika billing SIMRS.
+> Akan diintegrasikan ke sistem utuh menggunakan **Go + React**.
+
 API server untuk mengambil dan menampilkan data billing pasien dari database SIMRS (Sistem Informasi Manajemen Rumah Sakit).
 
 ## Fitur
@@ -115,11 +118,15 @@ Data billing diambil dari tabel-tabel berikut:
 
 | Kategori | Tabel | Deskripsi |
 |----------|-------|-----------|
-| Tindakan Ranap | `rawat_inap_pr`, `rawat_inap_dr`, `rawat_inap_drpr` | Tindakan petugas, dokter, dan gabungan |
-| Tindakan Ralan | `rawat_jl_pr`, `rawat_jl_dr`, `rawat_jl_drpr` | Tindakan rawat jalan |
+| Registrasi | `reg_periksa`, `penjab` | Biaya registrasi + info penjamin |
+| Akomodasi | `kamar_inap`, `kamar`, `bangsal` | Biaya kamar rawat inap |
+| Tindakan Ralan | `rawat_jl_pr`, `rawat_jl_dr`, `rawat_jl_drpr` | Tindakan rawat jalan (UNION ALL) |
+| Tindakan Ranap | `rawat_inap_pr`, `rawat_inap_dr`, `rawat_inap_drpr` | Tindakan rawat inap (UNION ALL) |
 | Obat & BHP | `detail_pemberian_obat` | Pemberian obat dan bahan habis pakai |
 | Radiologi | `periksa_radiologi` | Pemeriksaan radiologi |
 | Laboratorium | `periksa_lab` | Pemeriksaan laboratorium |
+| Operasi | `operasi`, `paket_operasi` | Biaya operasi (semua komponen) |
+| Retur Obat | `detreturjual`, `returjual` | Pengembalian obat (pengurang) |
 
 ## Struktur Response Item
 
@@ -142,12 +149,26 @@ Setiap item billing memiliki struktur:
 
 ```
 app.js
-├── Express Server (port 3000)
-├── MySQL Connection Pool
-├── SQL Queries (9 query paralel)
-├── Data Aggregation & Grouping
-└── Response Formatters (HTML/JSON)
+├── DATABASE           — MySQL connection pool
+├── CONSTANTS          — STATUS_ORDER (urutan tampilan)
+├── SQL QUERIES        — 9 query (ranap & ralan sudah UNION ALL)
+├── QUERY REGISTRY     — BILLING_QUERIES[] (tambah query baru cukup 1 entry)
+├── HELPER FUNCTIONS
+│   ├── fetchBillingItems(no_rawat)    — eksekusi paralel semua query
+│   ├── groupByStatus(items)           — grouping Status → Jenis
+│   ├── getOrderedStatuses(grouped)    — urutkan & filter status kosong
+│   └── renderBillingHtml(...)         — render template HTML
+├── ROUTES
+│   ├── GET /billing         — HTML (browser) + JSON (API)
+│   └── GET /billing/:no_rawat — JSON grouped by status
+└── START SERVER       — port 3000
 ```
+
+### Urutan Status Billing
+
+Status ditampilkan dalam urutan tetap. Status tanpa data otomatis disembunyikan:
+
+1. **Registrasi** → 2. **Akomodasi** → 3. **Ralan** → 4. **Ranap** → 5. **Retur**
 
 ## Contoh Penggunaan
 
@@ -173,14 +194,27 @@ const data = await response.json();
 console.log(data.grand_total);
 ```
 
-## TODO / Pengembangan Selanjutnya
+## Changelog
 
-- [ ] Autentikasi dan otorisasi
-- [ ] Validasi format `no_rawat`
-- [ ] Caching untuk query yang sering diakses
-- [ ] Logging request/response
-- [ ] Unit testing
-- [ ] Endpoint untuk listing pasien
+### 2026-02-10
+- ✅ Tambah billing registrasi, akomodasi (kamar), operasi, dan retur obat
+- ✅ Urutan status dikunci: Registrasi → Akomodasi → Ralan → Ranap → Retur
+- ✅ Status tanpa tagihan otomatis disembunyikan
+- ✅ Konsolidasi 6 query tindakan menjadi 2 query UNION ALL (13 → 9 round-trip)
+- ✅ Refactor ke arsitektur modular: helper functions + query registry
+- ✅ Endpoint `/billing/:no_rawat` diubah ke eksekusi paralel (Promise.all)
+
+## TODO / Pengembangan Selanjutnya (untuk integrasi Go + React)
+
+- [ ] Port logika query ke Go (SQL tetap sama)
+- [ ] Buat React frontend untuk kasir
+- [ ] Cari pasien (by nama, no_RM, no_rawat)
+- [ ] Info pasien di header billing
+- [ ] Proses pembayaran (input bayar, metode, kembalian)
+- [ ] Print struk/kwitansi
+- [ ] Autentikasi dan otorisasi kasir
+- [ ] Audit trail transaksi
+- [ ] Laporan harian kasir
 
 ## Lisensi
 

@@ -1,24 +1,12 @@
 import express from "express";
-import mysql from "mysql2/promise";
 import dotenv from "dotenv";
+import db from "./db.js";
+import paymentRoutes from "./payment.js";
 
 dotenv.config();
 
 const app = express();
-
-// ============================================================
-// DATABASE
-// ============================================================
-const db = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  port: parseInt(process.env.DB_PORT) || 3306,
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "sik",
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+app.use(express.json()); // Untuk parsing body JSON (POST)
 
 // ============================================================
 // CONSTANTS
@@ -386,6 +374,8 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
     `;
   }
 
+  const encodedNr = encodeURIComponent(no_rawat);
+
   return `
     <html>
     <head>
@@ -394,9 +384,26 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
         body { font-family: 'Segoe UI', sans-serif; padding: 20px; background: #f9f9f9; }
         h2 { color: #333; }
         .grand-total { font-size: 22px; margin-top: 20px; padding: 15px; background: #333; color: #fff; border-radius: 6px; }
+        .nav-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+        .nav-btn {
+          padding: 10px 18px; border: none; border-radius: 6px; cursor: pointer;
+          font-size: 14px; font-weight: 600; color: #fff; text-decoration: none;
+          transition: opacity 0.2s;
+        }
+        .nav-btn:hover { opacity: 0.85; }
+        .btn-home    { background: #6c757d; }
+        .btn-billing { background: #0d6efd; }
+        .btn-status  { background: #198754; }
+        .btn-riwayat { background: #6f42c1; }
       </style>
     </head>
     <body>
+      <div class="nav-bar">
+        <a class="nav-btn btn-home"    href="/">🏠 Home</a>
+        <a class="nav-btn btn-billing" href="/billing?no_rawat=${encodedNr}">📋 Billing</a>
+        <a class="nav-btn btn-status"  href="/payment/status/${encodedNr}">✅ Status Bayar</a>
+        <a class="nav-btn btn-riwayat" href="/payment/riwayat/${encodedNr}">📜 Riwayat Bayar</a>
+      </div>
       <h2>Billing: ${no_rawat}</h2>
       ${htmlContent}
       <div class="grand-total">
@@ -411,6 +418,71 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
     </html>
   `;
 }
+
+// ============================================================
+// HOME PAGE
+// ============================================================
+
+app.get("/", (req, res) => {
+  res.send(`
+    <html>
+    <head>
+      <title>MeraPG — Home</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .card { background: #16213e; padding: 40px; border-radius: 16px; width: 420px; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+        h1 { font-size: 28px; margin-bottom: 6px; color: #e94560; }
+        .subtitle { color: #888; margin-bottom: 28px; font-size: 14px; }
+        label { display: block; font-size: 13px; color: #aaa; margin-bottom: 6px; }
+        input {
+          width: 100%; padding: 12px 14px; border: 1px solid #333; border-radius: 8px;
+          background: #0f3460; color: #fff; font-size: 15px; margin-bottom: 20px; outline: none;
+        }
+        input:focus { border-color: #e94560; }
+        .buttons { display: flex; flex-direction: column; gap: 10px; }
+        .btn {
+          padding: 12px; border: none; border-radius: 8px; cursor: pointer;
+          font-size: 15px; font-weight: 600; color: #fff; transition: opacity 0.2s;
+          text-align: center;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn-billing { background: #0d6efd; }
+        .btn-status  { background: #198754; }
+        .btn-riwayat { background: #6f42c1; }
+        .footer { margin-top: 24px; text-align: center; font-size: 12px; color: #555; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>MeraPG</h1>
+        <p class="subtitle">Billing & Payment Gateway</p>
+        <label for="noRawat">No. Rawat</label>
+        <input type="text" id="noRawat" placeholder="2024/01/15/000001" autofocus />
+        <div class="buttons">
+          <button class="btn btn-billing" onclick="go('billing')">📋 Lihat Billing</button>
+          <button class="btn btn-status"  onclick="go('status')">✅ Status Pembayaran</button>
+          <button class="btn btn-riwayat" onclick="go('riwayat')">📜 Riwayat Pembayaran</button>
+        </div>
+        <div class="footer">rsaz_sik (read) · mera_db (write)</div>
+      </div>
+      <script>
+        function go(type) {
+          const nr = document.getElementById('noRawat').value.trim();
+          if (!nr) { alert('Masukkan No. Rawat terlebih dahulu'); return; }
+          const encoded = encodeURIComponent(nr);
+          if (type === 'billing') window.location.href = '/billing?no_rawat=' + encoded;
+          else if (type === 'status') window.location.href = '/payment/status/' + encoded;
+          else if (type === 'riwayat') window.location.href = '/payment/riwayat/' + encoded;
+        }
+        document.getElementById('noRawat').addEventListener('keydown', e => {
+          if (e.key === 'Enter') go('billing');
+        });
+      </script>
+    </body>
+    </html>
+  `);
+});
 
 // ============================================================
 // ROUTES
@@ -481,6 +553,11 @@ app.get("/billing/:no_rawat", async (req, res) => {
     res.status(500).json({ error: "Terjadi kesalahan pada server", message: error.message });
   }
 });
+
+// ============================================================
+// MOUNT ROUTES
+// ============================================================
+app.use("/payment", paymentRoutes);
 
 // ============================================================
 // START SERVER
