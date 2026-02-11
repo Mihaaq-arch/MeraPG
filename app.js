@@ -1,6 +1,6 @@
 import express from "express";
 import dotenv from "dotenv";
-import db from "./db.js";
+import db, { dbNew } from "./db.js";
 import paymentRoutes from "./payment.js";
 
 dotenv.config();
@@ -279,7 +279,31 @@ async function fetchBillingItems(no_rawat) {
     BILLING_QUERIES.map(q => db.execute(q.sql, q.params(no_rawat)))
   );
   // Setiap result = [rows, fields], ambil rows (index 0) lalu flatten
-  return results.flatMap(([rows]) => rows);
+  // Filter: sembunyikan item dengan total = 0
+  return results.flatMap(([rows]) => rows).filter(r => Number(r.total) !== 0);
+}
+
+/**
+ * Ambil data pembayaran yang sudah dilakukan dari mera_db.
+ * Return Map: "nama_item|status|jenis" -> total_dibayar
+ */
+async function fetchPaidItems(no_rawat) {
+  const [rows] = await dbNew.execute(
+    `SELECT d.nama_item, d.status, d.jenis, SUM(d.total) as total_dibayar
+     FROM billing_payment_detail d
+     JOIN billing_payment p ON d.no_nota = p.no_nota
+     WHERE p.no_rawat = ?
+     GROUP BY d.nama_item, d.status, d.jenis`,
+    [no_rawat]
+  );
+  const map = {};
+  let totalPaid = 0;
+  for (const r of rows) {
+    const key = `${r.nama_item}|${r.status}|${r.jenis}`;
+    map[key] = Number(r.total_dibayar);
+    totalPaid += Number(r.total_dibayar);
+  }
+  return { paidMap: map, totalPaid };
 }
 
 /**
@@ -319,10 +343,11 @@ function getOrderedStatuses(grouped) {
 }
 
 /**
- * Render HTML billing lengkap.
+ * Render HTML billing lengkap dengan payment UI.
  */
-function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, jsonResponse) {
+function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paidMap, totalPaid) {
   let htmlContent = "";
+  let itemIndex = 0;
 
   for (const status of orderedStatuses) {
     const jenisMap = grouped[status];
@@ -332,30 +357,50 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
     for (const [jenis, data] of Object.entries(jenisMap)) {
       statusSubtotal += data.subtotal;
       jenisHtml += `
-        <details style="margin-left: 20px; margin-bottom: 8px;">
+        <details style="margin-left: 20px; margin-bottom: 8px;" open>
           <summary style="cursor: pointer; padding: 8px; background: #e9e9e9; border-radius: 4px;">
             <strong>${jenis}</strong> — Subtotal: <span style="color: green; font-weight: bold;">Rp ${data.subtotal.toLocaleString()}</span> (${data.items.length} item)
           </summary>
           <table style="width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 14px;">
             <thead>
               <tr style="background: #f5f5f5;">
+                <th style="border: 1px solid #ccc; padding: 6px; width: 40px;">Pilih</th>
                 <th style="border: 1px solid #ccc; padding: 6px;">Nama</th>
                 <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Biaya</th>
                 <th style="border: 1px solid #ccc; padding: 6px; text-align: center;">Jml</th>
-                <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Tambahan</th>
                 <th style="border: 1px solid #ccc; padding: 6px; text-align: right;">Total</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: center;">Status</th>
               </tr>
             </thead>
             <tbody>
-              ${data.items.map(r => `
-                <tr>
+              ${data.items.map(r => {
+                const key = `${r.nama_brng}|${r.status}|${r.jenis}`;
+                const isPaid = paidMap[key] >= Number(r.total);
+                const idx = itemIndex++;
+                const rowBg = isPaid ? 'background: #e8f5e9;' : '';
+                return `
+                <tr style="${rowBg}">
+                  <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">
+                    ${isPaid
+                      ? '<span style="color: #999; font-size: 18px;">—</span>'
+                      : `<input type="checkbox" class="item-cb" data-idx="${idx}"
+                           data-nama="${r.nama_brng.replace(/"/g, '&quot;')}" data-status="${r.status}"
+                           data-jenis="${r.jenis}" data-jumlah="${r.jml}"
+                           data-biaya="${r.biaya_obat}" data-total="${r.total}" />`
+                    }
+                  </td>
                   <td style="border: 1px solid #ccc; padding: 6px;">${r.nama_brng}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.biaya_obat).toLocaleString()}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">${r.jml}</td>
-                  <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${r.embalase + r.tuslah}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.total).toLocaleString()}</td>
-                </tr>
-              `).join("")}
+                  <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">
+                    ${isPaid
+                      ? '<span style="background:#198754; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600;">LUNAS</span>'
+                      : '<span style="background:#ffc107; color:#333; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600;">BELUM</span>'
+                    }
+                  </td>
+                </tr>`;
+              }).join("")}
             </tbody>
           </table>
         </details>
@@ -363,7 +408,7 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
     }
 
     htmlContent += `
-      <details style="margin-bottom: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 10px;">
+      <details style="margin-bottom: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 10px;" open>
         <summary style="cursor: pointer; font-size: 18px; font-weight: bold; padding: 8px; background: #d0e8ff; border-radius: 4px;">
           Status: ${status} — Total: <span style="color: blue;">Rp ${statusSubtotal.toLocaleString()}</span>
         </summary>
@@ -375,15 +420,15 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
   }
 
   const encodedNr = encodeURIComponent(no_rawat);
+  const sisa = grand_total - totalPaid;
 
   return `
     <html>
     <head>
       <title>Billing: ${no_rawat}</title>
       <style>
-        body { font-family: 'Segoe UI', sans-serif; padding: 20px; background: #f9f9f9; }
+        body { font-family: 'Segoe UI', sans-serif; padding: 20px 20px 120px 20px; background: #f9f9f9; }
         h2 { color: #333; }
-        .grand-total { font-size: 22px; margin-top: 20px; padding: 15px; background: #333; color: #fff; border-radius: 6px; }
         .nav-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
         .nav-btn {
           padding: 10px 18px; border: none; border-radius: 6px; cursor: pointer;
@@ -393,27 +438,176 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, json
         .nav-btn:hover { opacity: 0.85; }
         .btn-home    { background: #6c757d; }
         .btn-billing { background: #0d6efd; }
-        .btn-status  { background: #198754; }
         .btn-riwayat { background: #6f42c1; }
+
+        .summary-bar {
+          display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px;
+          padding: 14px; background: #1a1a2e; border-radius: 8px; color: #fff;
+        }
+        .summary-item { flex: 1; text-align: center; min-width: 140px; }
+        .summary-label { font-size: 12px; color: #aaa; margin-bottom: 4px; }
+        .summary-value { font-size: 20px; font-weight: 700; }
+        .summary-value.green { color: #4caf50; }
+        .summary-value.red   { color: #ef5350; }
+        .summary-value.blue  { color: #42a5f5; }
+
+        .pay-bar {
+          position: fixed; bottom: 0; left: 0; right: 0;
+          background: #16213e; color: #fff; padding: 14px 24px;
+          display: flex; align-items: center; justify-content: space-between;
+          box-shadow: 0 -4px 12px rgba(0,0,0,0.3); z-index: 100;
+        }
+        .pay-bar .pay-info { font-size: 14px; }
+        .pay-bar .pay-total { font-size: 20px; font-weight: 700; color: #4caf50; }
+        .pay-bar .pay-actions { display: flex; gap: 10px; align-items: center; }
+        .pay-btn {
+          padding: 10px 24px; border: none; border-radius: 8px; cursor: pointer;
+          font-size: 15px; font-weight: 700; color: #fff; transition: all 0.2s;
+        }
+        .pay-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .pay-btn-bayar { background: #198754; }
+        .pay-btn-bayar:hover:not(:disabled) { background: #157347; }
+        .pay-btn-all { background: #0d6efd; }
+        .pay-btn-all:hover { background: #0b5ed7; }
+        .pay-btn-none { background: #6c757d; }
+        .pay-btn-none:hover { background: #5c636a; }
+
+        .kasir-input {
+          padding: 8px 12px; border: 1px solid #444; border-radius: 6px;
+          background: #0f3460; color: #fff; font-size: 14px; width: 140px;
+        }
+
+        .toast {
+          position: fixed; top: 20px; right: 20px; padding: 14px 20px;
+          border-radius: 8px; color: #fff; font-weight: 600; z-index: 200;
+          display: none; animation: slideIn 0.3s ease;
+        }
+        .toast.success { background: #198754; }
+        .toast.error { background: #dc3545; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity:0; } to { transform: translateX(0); opacity:1; } }
       </style>
     </head>
     <body>
+      <div id="toast" class="toast"></div>
+
       <div class="nav-bar">
-        <a class="nav-btn btn-home"    href="/">🏠 Home</a>
-        <a class="nav-btn btn-billing" href="/billing?no_rawat=${encodedNr}">📋 Billing</a>
-        <a class="nav-btn btn-status"  href="/payment/status/${encodedNr}">✅ Status Bayar</a>
-        <a class="nav-btn btn-riwayat" href="/payment/riwayat/${encodedNr}">📜 Riwayat Bayar</a>
+        <a class="nav-btn btn-home" href="/">🏠 Home</a>
+        <a class="nav-btn btn-billing" href="/billing?no_rawat=${encodedNr}">🔄 Refresh</a>
+        <a class="nav-btn btn-riwayat" href="/payment/riwayat/${encodedNr}">📜 Riwayat JSON</a>
       </div>
+
       <h2>Billing: ${no_rawat}</h2>
-      ${htmlContent}
-      <div class="grand-total">
-        Grand Total: Rp ${grand_total.toLocaleString()}
+
+      <div class="summary-bar">
+        <div class="summary-item">
+          <div class="summary-label">Total Tagihan</div>
+          <div class="summary-value blue">Rp ${grand_total.toLocaleString()}</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-label">Sudah Dibayar</div>
+          <div class="summary-value green">Rp ${totalPaid.toLocaleString()}</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-label">Sisa</div>
+          <div class="summary-value ${sisa > 0 ? 'red' : 'green'}">Rp ${sisa.toLocaleString()}</div>
+        </div>
       </div>
-      <hr/>
-      <details>
-        <summary>Lihat JSON Response</summary>
-        <pre>${JSON.stringify(jsonResponse, null, 2)}</pre>
-      </details>
+
+      ${htmlContent}
+
+      <!-- Floating Payment Bar -->
+      <div class="pay-bar">
+        <div>
+          <div class="pay-info">Terpilih: <strong id="selectedCount">0</strong> item</div>
+          <div class="pay-total" id="selectedTotal">Rp 0</div>
+        </div>
+        <div class="pay-actions">
+          <button class="pay-btn pay-btn-all" onclick="selectAll()">Pilih Semua</button>
+          <button class="pay-btn pay-btn-none" onclick="deselectAll()">Batal Pilih</button>
+          <input class="kasir-input" id="kasirId" placeholder="ID Kasir" value="admin" />
+          <button class="pay-btn pay-btn-bayar" id="btnBayar" disabled onclick="bayar()">💰 Bayar</button>
+        </div>
+      </div>
+
+      <script>
+        const noRawat = '${no_rawat.replace(/'/g, "\\'")}';
+
+        function getChecked() {
+          return [...document.querySelectorAll('.item-cb:checked')];
+        }
+
+        function updateTotal() {
+          const checked = getChecked();
+          const total = checked.reduce((s, cb) => s + Number(cb.dataset.total), 0);
+          document.getElementById('selectedCount').textContent = checked.length;
+          document.getElementById('selectedTotal').textContent = 'Rp ' + total.toLocaleString();
+          document.getElementById('btnBayar').disabled = checked.length === 0;
+        }
+
+        document.addEventListener('change', e => {
+          if (e.target.classList.contains('item-cb')) updateTotal();
+        });
+
+        function selectAll() {
+          document.querySelectorAll('.item-cb').forEach(cb => cb.checked = true);
+          updateTotal();
+        }
+        function deselectAll() {
+          document.querySelectorAll('.item-cb').forEach(cb => cb.checked = false);
+          updateTotal();
+        }
+
+        function showToast(msg, type) {
+          const t = document.getElementById('toast');
+          t.textContent = msg;
+          t.className = 'toast ' + type;
+          t.style.display = 'block';
+          setTimeout(() => t.style.display = 'none', 3000);
+        }
+
+        async function bayar() {
+          const checked = getChecked();
+          if (checked.length === 0) return;
+          const kasir = document.getElementById('kasirId').value.trim();
+          if (!kasir) { alert('Masukkan ID Kasir'); return; }
+
+          const items = checked.map(cb => ({
+            nama_item: cb.dataset.nama,
+            status: cb.dataset.status,
+            jenis: cb.dataset.jenis,
+            jumlah: Number(cb.dataset.jumlah),
+            biaya: Number(cb.dataset.biaya),
+            total: Number(cb.dataset.total)
+          }));
+
+          const totalBayar = items.reduce((s, i) => s + i.total, 0);
+          if (!confirm('Bayar ' + items.length + ' item senilai Rp ' + totalBayar.toLocaleString() + '?')) return;
+
+          document.getElementById('btnBayar').disabled = true;
+          document.getElementById('btnBayar').textContent = '⏳ Memproses...';
+
+          try {
+            const resp = await fetch('/payment/bayar', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ no_rawat: noRawat, id_user_kasir: kasir, items })
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+              showToast('✅ Pembayaran berhasil! Nota: ' + data.no_nota, 'success');
+              setTimeout(() => location.reload(), 1500);
+            } else {
+              showToast('❌ Gagal: ' + (data.error || data.message), 'error');
+              document.getElementById('btnBayar').disabled = false;
+              document.getElementById('btnBayar').textContent = '💰 Bayar';
+            }
+          } catch (err) {
+            showToast('❌ Error: ' + err.message, 'error');
+            document.getElementById('btnBayar').disabled = false;
+            document.getElementById('btnBayar').textContent = '💰 Bayar';
+          }
+        }
+      </script>
     </body>
     </html>
   `;
@@ -497,15 +691,19 @@ app.get("/billing", async (req, res) => {
   }
 
   try {
-    const allItems = await fetchBillingItems(no_rawat);
+    // Fetch billing + payment data in parallel
+    const [allItems, { paidMap, totalPaid }] = await Promise.all([
+      fetchBillingItems(no_rawat),
+      fetchPaidItems(no_rawat).catch(() => ({ paidMap: {}, totalPaid: 0 }))
+    ]);
     const { grouped, grand_total } = groupByStatus(allItems);
     const orderedStatuses = getOrderedStatuses(grouped);
 
-    const jsonResponse = { no_rawat, items: allItems, grand_total };
+    const jsonResponse = { no_rawat, items: allItems, grand_total, totalPaid, sisa: grand_total - totalPaid };
 
     // Tampilan HTML untuk browser
     if (req.headers.accept?.includes("text/html")) {
-      return res.send(renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, jsonResponse));
+      return res.send(renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paidMap, totalPaid));
     }
 
     // Response JSON untuk API
