@@ -270,6 +270,17 @@ const BILLING_QUERIES = [
 // HELPER FUNCTIONS
 // ============================================================
 
+/** Escape HTML untuk mencegah XSS */
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Eksekusi semua billing queries secara paralel,
  * return flat array of billing items.
@@ -307,7 +318,7 @@ async function fetchPaidItems(no_rawat) {
       totalPaidNew += Number(r.total_dibayar);
     }
   } catch (e) {
-    // mera_db belum siap, lanjut saja
+    console.warn('[billing] mera_db query gagal:', e.message);
   }
 
   // 2. Pembayaran lama dari tagihan_sadewa (rsaz_sik)
@@ -327,7 +338,7 @@ async function fetchPaidItems(no_rawat) {
       legacyPaid.totalBayar = legacyRows.reduce((s, r) => s + Number(r.jumlah_bayar), 0);
     }
   } catch (e) {
-    // tagihan_sadewa tidak tersedia, lanjut saja
+    console.warn('[billing] tagihan_sadewa query gagal:', e.message);
   }
 
   const totalPaid = totalPaidNew + legacyPaid.totalBayar;
@@ -388,7 +399,7 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paid
       jenisHtml += `
         <details style="margin-left: 20px; margin-bottom: 8px;" open>
           <summary style="cursor: pointer; padding: 8px; background: #e9e9e9; border-radius: 4px;">
-            <strong>${jenis}</strong> — Subtotal: <span style="color: green; font-weight: bold;">Rp ${data.subtotal.toLocaleString()}</span> (${data.items.length} item)
+            <strong>${escapeHtml(jenis)}</strong> — Subtotal: <span style="color: green; font-weight: bold;">Rp ${data.subtotal.toLocaleString()}</span> (${data.items.length} item)
           </summary>
           <table style="width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 14px;">
             <thead>
@@ -414,12 +425,12 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paid
                     ${isPaid
                       ? '<span style="color: #999; font-size: 18px;">—</span>'
                       : `<input type="checkbox" class="item-cb" data-idx="${idx}"
-                           data-nama="${r.nama_brng.replace(/"/g, '&quot;')}" data-status="${r.status}"
-                           data-jenis="${r.jenis}" data-jumlah="${r.jml}"
+                           data-nama="${escapeHtml(r.nama_brng)}" data-status="${escapeHtml(r.status)}"
+                           data-jenis="${escapeHtml(r.jenis)}" data-jumlah="${r.jml}"
                            data-biaya="${r.biaya_obat}" data-total="${r.total}" />`
                     }
                   </td>
-                  <td style="border: 1px solid #ccc; padding: 6px;">${r.nama_brng}</td>
+                  <td style="border: 1px solid #ccc; padding: 6px;">${escapeHtml(r.nama_brng)}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.biaya_obat).toLocaleString()}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">${r.jml}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.total).toLocaleString()}</td>
@@ -758,9 +769,9 @@ app.get("/billing", async (req, res) => {
   }
 });
 
-// Endpoint 2: /billing/:no_rawat — JSON grouped by status
-app.get("/billing/:no_rawat", async (req, res) => {
-  const { no_rawat } = req.params;
+// Endpoint 2: /billing/* — JSON grouped by status (wildcard untuk no_rawat dengan /)
+app.get("/billing/{*path}", async (req, res) => {
+  const no_rawat = req.params.path;
 
   try {
     const allItems = await fetchBillingItems(no_rawat);
@@ -803,7 +814,8 @@ app.use("/payment", paymentRoutes);
 // ============================================================
 // START SERVER
 // ============================================================
-app.listen(3000, () => {
-  console.log("Server berjalan di port 3000");
-  console.log("Coba buka: http://localhost:3000/billing?no_rawat=...");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server berjalan di port ${PORT}`);
+  console.log(`Coba buka: http://localhost:${PORT}/`);
 });

@@ -34,15 +34,23 @@ const router = Router();
 // ) ENGINE=InnoDB;
 
 // ============================================================
-// HELPER — Generate nomor nota unik
+// HELPER — Generate nomor nota unik (menggunakan connection)
 // ============================================================
-async function generateNoNota() {
+
+/**
+ * Generate no_nota menggunakan connection yang SAMA dengan transaction.
+ * Pakai SELECT ... FOR UPDATE untuk lock row dan hindari race condition.
+ * Jika terjadi duplicate, retry sampai MAX_RETRY kali.
+ */
+const MAX_RETRY = 3;
+
+async function generateNoNota(connection) {
   const today = new Date();
   const prefix = `NB${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
 
-  // Cari nomor terakhir hari ini
-  const [rows] = await db.execute(
-    `SELECT no_nota FROM billing_payment WHERE no_nota LIKE ? ORDER BY no_nota DESC LIMIT 1`,
+  // SELECT ... FOR UPDATE → lock baris terakhir agar kasir lain menunggu
+  const [rows] = await connection.execute(
+    `SELECT no_nota FROM billing_payment WHERE no_nota LIKE ? ORDER BY no_nota DESC LIMIT 1 FOR UPDATE`,
     [`${prefix}%`]
   );
 
@@ -53,6 +61,43 @@ async function generateNoNota() {
   }
 
   return `${prefix}${String(seq).padStart(4, "0")}`;
+}
+
+// ============================================================
+// HELPER — Cek item yang sudah pernah dibayar
+// ============================================================
+
+/**
+ * Cek apakah ada item yang sudah pernah dibayar (duplikat).
+ * Return array nama item yang sudah lunas.
+ */
+async function checkDuplicatePayment(connection, no_rawat, items) {
+  // Ambil semua item yang sudah dibayar untuk no_rawat ini
+  const [paidRows] = await connection.execute(
+    `SELECT d.nama_item, d.status, d.jenis, SUM(d.total) as total_dibayar
+     FROM billing_payment_detail d
+     JOIN billing_payment p ON d.no_nota = p.no_nota
+     WHERE p.no_rawat = ?
+     GROUP BY d.nama_item, d.status, d.jenis`,
+    [no_rawat]
+  );
+
+  const paidMap = {};
+  for (const r of paidRows) {
+    const key = `${r.nama_item}|${r.status}|${r.jenis}`;
+    paidMap[key] = Number(r.total_dibayar);
+  }
+
+  // Cek setiap item yang mau dibayar
+  const duplicates = [];
+  for (const item of items) {
+    const key = `${item.nama_item}|${item.status}|${item.jenis}`;
+    if (paidMap[key] && paidMap[key] >= Number(item.total)) {
+      duplicates.push(item.nama_item);
+    }
+  }
+
+  return duplicates;
 }
 
 // ============================================================
@@ -83,85 +128,141 @@ router.post("/bayar", async (req, res) => {
     });
   }
 
-  const connection = await db.getConnection();
-  try {
-    await connection.beginTransaction();
-
-    const no_nota = await generateNoNota();
-    const total_bayar = items.reduce((sum, i) => sum + Number(i.total), 0);
-
-    // Insert header pembayaran
-    await connection.execute(
-      `INSERT INTO billing_payment (no_nota, no_rawat, tgl_bayar, id_user_kasir, total_bayar, keterangan)
-       VALUES (?, ?, NOW(), ?, ?, ?)`,
-      [no_nota, no_rawat, id_user_kasir, total_bayar, keterangan || null]
-    );
-
-    // Insert detail item yang dibayar
-    for (const item of items) {
-      await connection.execute(
-        `INSERT INTO billing_payment_detail (no_nota, nama_item, status, jenis, jumlah, biaya, total)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [no_nota, item.nama_item, item.status, item.jenis, item.jumlah, item.biaya, item.total]
-      );
+  // Validasi setiap item
+  for (const item of items) {
+    if (!item.nama_item || !item.status || !item.jenis || item.total == null) {
+      return res.status(400).json({
+        error: "Setiap item harus punya: nama_item, status, jenis, total"
+      });
     }
-
-    await connection.commit();
-
-    res.status(201).json({
-      message: "Pembayaran berhasil disimpan",
-      no_nota,
-      no_rawat,
-      total_bayar,
-      jumlah_item: items.length
-    });
-
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error simpan pembayaran:", error);
-    res.status(500).json({ error: "Gagal menyimpan pembayaran", message: error.message });
-  } finally {
-    connection.release();
   }
+
+  let attempt = 0;
+  while (attempt < MAX_RETRY) {
+    attempt++;
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      // Cek duplikat pembayaran
+      const duplicates = await checkDuplicatePayment(connection, no_rawat, items);
+      if (duplicates.length > 0) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: "Item sudah pernah dibayar",
+          duplicates
+        });
+      }
+
+      // Generate no_nota di DALAM transaction (dengan FOR UPDATE lock)
+      const no_nota = await generateNoNota(connection);
+      const total_bayar = items.reduce((sum, i) => sum + Number(i.total), 0);
+
+      // Insert header pembayaran
+      await connection.execute(
+        `INSERT INTO billing_payment (no_nota, no_rawat, tgl_bayar, id_user_kasir, total_bayar, keterangan)
+         VALUES (?, ?, NOW(), ?, ?, ?)`,
+        [no_nota, no_rawat, id_user_kasir, total_bayar, keterangan || null]
+      );
+
+      // Insert detail item — batch insert lebih efisien
+      if (items.length > 0) {
+        const placeholders = items.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
+        const values = items.flatMap(item => [
+          no_nota, item.nama_item, item.status, item.jenis,
+          item.jumlah || 1, item.biaya || 0, item.total
+        ]);
+        await connection.execute(
+          `INSERT INTO billing_payment_detail (no_nota, nama_item, status, jenis, jumlah, biaya, total)
+           VALUES ${placeholders}`,
+          values
+        );
+      }
+
+      await connection.commit();
+
+      return res.status(201).json({
+        message: "Pembayaran berhasil disimpan",
+        no_nota,
+        no_rawat,
+        total_bayar,
+        jumlah_item: items.length
+      });
+
+    } catch (error) {
+      await connection.rollback();
+
+      // Jika duplicate key (race condition), retry
+      if (error.code === "ER_DUP_ENTRY" && attempt < MAX_RETRY) {
+        console.warn(`[payment] Retry ${attempt}/${MAX_RETRY} — duplicate no_nota, regenerating...`);
+        continue;
+      }
+
+      console.error("Error simpan pembayaran:", error);
+      return res.status(500).json({ error: "Gagal menyimpan pembayaran", message: error.message });
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Jika semua retry gagal
+  return res.status(500).json({ error: "Gagal generate nomor nota setelah beberapa percobaan" });
 });
 
 /**
  * GET /payment/riwayat/:no_rawat
  *
- * Lihat semua riwayat pembayaran untuk 1 no_rawat
+ * Lihat semua riwayat pembayaran untuk 1 no_rawat.
+ * Wildcard route: no_rawat bisa mengandung "/" (contoh: 2025/11/23/010020)
  */
-router.get("/riwayat/:no_rawat", async (req, res) => {
-  const { no_rawat } = req.params;
+router.get("/riwayat/{*path}", async (req, res) => {
+  const no_rawat = req.params.path;
 
   try {
-    // Ambil semua nota untuk no_rawat ini
-    const [payments] = await db.execute(
-      `SELECT no_nota, tgl_bayar, id_user_kasir, total_bayar, keterangan
-       FROM billing_payment
-       WHERE no_rawat = ?
-       ORDER BY tgl_bayar DESC`,
+    // Single query dengan JOIN — menghindari N+1
+    const [rows] = await db.execute(
+      `SELECT p.no_nota, p.tgl_bayar, p.id_user_kasir, p.total_bayar, p.keterangan,
+              d.nama_item, d.status, d.jenis, d.jumlah, d.biaya, d.total
+       FROM billing_payment p
+       LEFT JOIN billing_payment_detail d ON p.no_nota = d.no_nota
+       WHERE p.no_rawat = ?
+       ORDER BY p.tgl_bayar DESC, d.id ASC`,
       [no_rawat]
     );
 
-    // Untuk setiap nota, ambil detailnya
-    const result = [];
-    for (const payment of payments) {
-      const [details] = await db.execute(
-        `SELECT nama_item, status, jenis, jumlah, biaya, total
-         FROM billing_payment_detail
-         WHERE no_nota = ?`,
-        [payment.no_nota]
-      );
-      result.push({ ...payment, items: details });
+    // Group rows by no_nota
+    const paymentMap = new Map();
+    for (const row of rows) {
+      if (!paymentMap.has(row.no_nota)) {
+        paymentMap.set(row.no_nota, {
+          no_nota: row.no_nota,
+          tgl_bayar: row.tgl_bayar,
+          id_user_kasir: row.id_user_kasir,
+          total_bayar: row.total_bayar,
+          keterangan: row.keterangan,
+          items: []
+        });
+      }
+      if (row.nama_item) {
+        paymentMap.get(row.no_nota).items.push({
+          nama_item: row.nama_item,
+          status: row.status,
+          jenis: row.jenis,
+          jumlah: row.jumlah,
+          biaya: row.biaya,
+          total: row.total
+        });
+      }
     }
 
-    const total_sudah_dibayar = payments.reduce((sum, p) => sum + Number(p.total_bayar), 0);
+    const riwayat = [...paymentMap.values()];
+    const total_sudah_dibayar = riwayat.reduce((sum, p) => sum + Number(p.total_bayar), 0);
 
     res.json({
       no_rawat,
       total_sudah_dibayar,
-      jumlah_transaksi: payments.length,
-      riwayat: result
+      jumlah_transaksi: riwayat.length,
+      riwayat
     });
 
   } catch (error) {
@@ -174,10 +275,10 @@ router.get("/riwayat/:no_rawat", async (req, res) => {
  * GET /payment/status/:no_rawat
  *
  * Lihat item mana yang sudah dibayar dan mana yang belum.
- * Menggabungkan data billing (dari query app.js) dengan data pembayaran.
+ * Wildcard route: no_rawat bisa mengandung "/"
  */
-router.get("/status/:no_rawat", async (req, res) => {
-  const { no_rawat } = req.params;
+router.get("/status/{*path}", async (req, res) => {
+  const no_rawat = req.params.path;
 
   try {
     // Ambil semua item yang sudah pernah dibayar
@@ -203,7 +304,7 @@ router.get("/status/:no_rawat", async (req, res) => {
       no_rawat,
       total_sudah_dibayar,
       paid_items: paidItems,
-      _lookup: paidMap // Frontend bisa pakai ini untuk centang/uncentang
+      _lookup: paidMap
     });
 
   } catch (error) {
