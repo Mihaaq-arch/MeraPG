@@ -1,216 +1,198 @@
-# MeraPG Billing API
+# MeraPG Billing & Payment Gateway
 
-> **Blueprint / Prototype** — Node.js prototype untuk logika billing SIMRS.
+> **Blueprint / Prototype** — Node.js prototype untuk logika billing & pembayaran SIMRS.
 > Akan diintegrasikan ke sistem utuh menggunakan **Go + React**.
 
-API server untuk mengambil dan menampilkan data billing pasien dari database SIMRS (Sistem Informasi Manajemen Rumah Sakit).
+Billing & Payment gateway untuk SIMRS dengan arsitektur **dual-database**: membaca data tagihan dari database lama (read-only) dan menyimpan data pembayaran ke database baru.
 
 ## Fitur
 
-- 📊 **Aggregasi data billing** dari berbagai sumber (tindakan, obat, radiologi, laboratorium)
+- 📊 **Aggregasi data billing** dari berbagai sumber (tindakan, obat, radiologi, laboratorium, operasi)
 - 🏥 **Mendukung rawat inap (Ranap) dan rawat jalan (Ralan)**
+- 💰 **Pembayaran kasir** dengan UI interaktif langsung di halaman billing
+- 🔄 **Dual database** — `rsaz_sik` (read) + `mera_db` (write)
+- ✅ **Integrasi SIMRS lama** — mengenali pembayaran dari `tagihan_sadewa`
 - 📄 **Dual output**: HTML (untuk browser) dan JSON (untuk API)
-- 🔄 **Grouping otomatis** berdasarkan status dan jenis layanan
+
+## Arsitektur Database
+
+```
+┌─────────────┐     ┌──────────────────┐
+│   MeraPG    │────▶│ dbLegacy (pool)  │──▶ rsaz_sik (READ-ONLY)
+│   app.js    │     │ - billing data   │    - reg_periksa, rawat_*, dll
+│             │     │ - tagihan_sadewa │    - tagihan_sadewa
+│             │     └──────────────────┘
+│             │     ┌──────────────────┐
+│ payment.js  │────▶│ dbNew (pool)     │──▶ mera_db (READ+WRITE)
+│             │     │ - billing_payment│    - billing_payment
+│             │     │ - payment_detail │    - billing_payment_detail
+└─────────────┘     └──────────────────┘
+```
 
 ## Persyaratan
 
 - Node.js v18+
 - MySQL/MariaDB
-- Database SIMRS dengan struktur tabel yang sesuai
+- Database SIMRS (`rsaz_sik`) dengan struktur tabel yang sesuai
+- Database baru (`mera_db`) untuk data pembayaran
 
 ## Instalasi
 
 ```bash
-# Clone repository
 git clone https://github.com/Mihaaq/MeraPG.git
 cd MeraPG
-
-# Install dependencies
 npm install
-
-# Konfigurasi environment
-cp .env.example .env
-# Edit .env sesuai konfigurasi database Anda
 ```
 
 ## Konfigurasi
 
-Buat file `.env` dengan isi:
+Buat file `.env`:
 
 ```env
+# Database lama (READ-ONLY)
 DB_HOST=localhost
 DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=your_password
-DB_NAME=sik
+DB_NAME=rsaz_sik
+
+# Database baru (READ+WRITE)
+DB_NEW_HOST=localhost
+DB_NEW_PORT=3306
+DB_NEW_USER=root
+DB_NEW_PASSWORD=your_password
+DB_NEW_NAME=mera_db
+```
+
+### Setup Database Baru
+
+```sql
+CREATE DATABASE mera_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE mera_db;
+
+CREATE TABLE billing_payment (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  no_nota VARCHAR(20) NOT NULL UNIQUE,
+  no_rawat VARCHAR(20) NOT NULL,
+  tgl_bayar DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  id_user_kasir VARCHAR(20) NOT NULL,
+  total_bayar DOUBLE NOT NULL DEFAULT 0,
+  keterangan TEXT,
+  INDEX idx_no_rawat (no_rawat),
+  INDEX idx_tgl_bayar (tgl_bayar)
+) ENGINE=InnoDB;
+
+CREATE TABLE billing_payment_detail (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  no_nota VARCHAR(20) NOT NULL,
+  nama_item VARCHAR(200) NOT NULL,
+  status VARCHAR(30) NOT NULL COMMENT 'Registrasi/Akomodasi/Ralan/Ranap/Retur',
+  jenis VARCHAR(100) NOT NULL,
+  jumlah DOUBLE NOT NULL DEFAULT 1,
+  biaya DOUBLE NOT NULL DEFAULT 0,
+  total DOUBLE NOT NULL DEFAULT 0,
+  FOREIGN KEY (no_nota) REFERENCES billing_payment(no_nota)
+) ENGINE=InnoDB;
 ```
 
 ## Menjalankan Server
 
 ```bash
-# Production
-npm start
-
-# Development (dengan auto-reload)
-npm run dev
-
-# Atau langsung
-node app.js
+npm run dev     # Development (auto-reload)
+npm start       # Production
 ```
 
-Server akan berjalan di `http://localhost:3000`
+Server berjalan di `http://localhost:3000`
 
 ## API Endpoints
 
-### 1. GET `/billing`
+### Halaman
 
-Mengambil data billing dengan query parameter.
+| Method | Path | Deskripsi |
+|--------|------|-----------|
+| GET | `/` | Home page — input no_rawat + navigasi |
+| GET | `/billing?no_rawat=...` | Halaman billing + pembayaran kasir (HTML/JSON) |
 
-**Request:**
-```
-GET /billing?no_rawat=2024/01/15/000001
-```
+### Billing API
 
-**Response (Browser/HTML):**
-Menampilkan halaman HTML dengan data billing yang dikelompokkan dan collapsible.
+| Method | Path | Deskripsi |
+|--------|------|-----------|
+| GET | `/billing?no_rawat=...` | Billing items + grand total (HTML/JSON) |
+| GET | `/billing/:no_rawat` | Billing grouped by status (JSON only) |
 
-**Response (API/JSON):**
+### Payment API
+
+| Method | Path | Deskripsi |
+|--------|------|-----------|
+| POST | `/payment/bayar` | Simpan pembayaran (dari UI atau API) |
+| GET | `/payment/status/:no_rawat` | Cek item mana yang sudah/belum dibayar |
+| GET | `/payment/riwayat/:no_rawat` | Riwayat semua transaksi pembayaran |
+
+### Contoh POST `/payment/bayar`
+
 ```json
 {
   "no_rawat": "2024/01/15/000001",
-  "items": [...],
-  "grand_total": 1500000
+  "id_user_kasir": "admin",
+  "items": [
+    { "nama_item": "Registrasi", "status": "Registrasi", "jenis": "BPJS", "jumlah": 1, "biaya": 25000, "total": 25000 }
+  ]
 }
 ```
 
-### 2. GET `/billing/:no_rawat`
+## Sumber Data Billing
 
-Mengambil data billing dengan path parameter (khusus JSON).
-
-**Request:**
-```
-GET /billing/2024/01/15/000001
-```
-
-**Response:**
-```json
-{
-  "no_rawat": "2024/01/15/000001",
-  "groups": [
-    {
-      "status": "Ranap",
-      "items": [...],
-      "subtotal": 1000000
-    },
-    {
-      "status": "Ralan",
-      "items": [...],
-      "subtotal": 500000
-    }
-  ],
-  "grand_total": 1500000
-}
-```
-
-## Sumber Data
-
-Data billing diambil dari tabel-tabel berikut:
-
-| Kategori | Tabel | Deskripsi |
-|----------|-------|-----------|
+| Kategori | Tabel (rsaz_sik) | Deskripsi |
+|----------|-------------------|-----------|
 | Registrasi | `reg_periksa`, `penjab` | Biaya registrasi + info penjamin |
 | Akomodasi | `kamar_inap`, `kamar`, `bangsal` | Biaya kamar rawat inap |
-| Tindakan Ralan | `rawat_jl_pr`, `rawat_jl_dr`, `rawat_jl_drpr` | Tindakan rawat jalan (UNION ALL) |
-| Tindakan Ranap | `rawat_inap_pr`, `rawat_inap_dr`, `rawat_inap_drpr` | Tindakan rawat inap (UNION ALL) |
-| Obat & BHP | `detail_pemberian_obat` | Pemberian obat dan bahan habis pakai |
+| Tindakan Ralan | `rawat_jl_pr`, `rawat_jl_dr`, `rawat_jl_drpr` | Tindakan rawat jalan |
+| Tindakan Ranap | `rawat_inap_pr`, `rawat_inap_dr`, `rawat_inap_drpr` | Tindakan rawat inap |
+| Obat & BHP | `detail_pemberian_obat` | Obat dan bahan habis pakai |
 | Radiologi | `periksa_radiologi` | Pemeriksaan radiologi |
 | Laboratorium | `periksa_lab` | Pemeriksaan laboratorium |
-| Operasi | `operasi`, `paket_operasi` | Biaya operasi (semua komponen) |
+| Operasi | `operasi`, `paket_operasi` | Biaya operasi |
 | Retur Obat | `detreturjual`, `returjual` | Pengembalian obat (pengurang) |
+| **Pembayaran lama** | `tagihan_sadewa` | Pembayaran via SIMRS (read-only) |
 
-## Struktur Response Item
-
-Setiap item billing memiliki struktur:
-
-```json
-{
-  "nama_brng": "Nama tindakan/obat",
-  "biaya_obat": 50000,
-  "jml": 2,
-  "embalase": 0,
-  "tuslah": 0,
-  "total": 100000,
-  "status": "Ranap|Ralan",
-  "jenis": "Kategori layanan"
-}
-```
-
-## Arsitektur
+## Struktur File
 
 ```
-app.js
-├── DATABASE           — MySQL connection pool
-├── CONSTANTS          — STATUS_ORDER (urutan tampilan)
-├── SQL QUERIES        — 9 query (ranap & ralan sudah UNION ALL)
-├── QUERY REGISTRY     — BILLING_QUERIES[] (tambah query baru cukup 1 entry)
-├── HELPER FUNCTIONS
-│   ├── fetchBillingItems(no_rawat)    — eksekusi paralel semua query
-│   ├── groupByStatus(items)           — grouping Status → Jenis
-│   ├── getOrderedStatuses(grouped)    — urutkan & filter status kosong
-│   └── renderBillingHtml(...)         — render template HTML
-├── ROUTES
-│   ├── GET /billing         — HTML (browser) + JSON (API)
-│   └── GET /billing/:no_rawat — JSON grouped by status
-└── START SERVER       — port 3000
-```
-
-### Urutan Status Billing
-
-Status ditampilkan dalam urutan tetap. Status tanpa data otomatis disembunyikan:
-
-1. **Registrasi** → 2. **Akomodasi** → 3. **Ralan** → 4. **Ranap** → 5. **Retur**
-
-## Contoh Penggunaan
-
-### Via Browser
-Buka: `http://localhost:3000/billing?no_rawat=2024/01/15/000001`
-
-### Via cURL
-```bash
-# JSON response
-curl -H "Accept: application/json" \
-  "http://localhost:3000/billing?no_rawat=2024/01/15/000001"
-
-# HTML response
-curl "http://localhost:3000/billing?no_rawat=2024/01/15/000001"
-```
-
-### Via JavaScript/Fetch
-```javascript
-const response = await fetch('/billing?no_rawat=2024/01/15/000001', {
-  headers: { 'Accept': 'application/json' }
-});
-const data = await response.json();
-console.log(data.grand_total);
+MeraPG/
+├── app.js        — Server utama, billing queries, UI billing+payment
+├── payment.js    — Routes pembayaran (CRUD ke mera_db)
+├── db.js         — Dual database pool (dbLegacy + dbNew)
+├── .env          — Konfigurasi kedua database
+└── package.json
 ```
 
 ## Changelog
 
+### 2026-02-11
+- ✅ Arsitektur dual-database: `rsaz_sik` (read-only) + `mera_db` (read+write)
+- ✅ Home page di `/` dengan form no_rawat dan navigasi
+- ✅ UI pembayaran kasir di halaman billing (checkbox, pilih semua, tombol bayar)
+- ✅ Summary bar: Total Tagihan / Sudah Dibayar / Sisa
+- ✅ Badge LUNAS/BELUM per item billing
+- ✅ Integrasi `tagihan_sadewa` — pembayaran lama dikenali dengan badge `LUNAS (SIMRS)`
+- ✅ Item dengan tagihan Rp 0 otomatis disembunyikan
+- ✅ Floating payment bar dengan input ID kasir
+- ✅ Payment route (`payment.js`) dialihkan ke `mera_db`
+
 ### 2026-02-10
 - ✅ Tambah billing registrasi, akomodasi (kamar), operasi, dan retur obat
 - ✅ Urutan status dikunci: Registrasi → Akomodasi → Ralan → Ranap → Retur
-- ✅ Status tanpa tagihan otomatis disembunyikan
-- ✅ Konsolidasi 6 query tindakan menjadi 2 query UNION ALL (13 → 9 round-trip)
+- ✅ Konsolidasi query tindakan menjadi UNION ALL
 - ✅ Refactor ke arsitektur modular: helper functions + query registry
-- ✅ Endpoint `/billing/:no_rawat` diubah ke eksekusi paralel (Promise.all)
 
-## TODO / Pengembangan Selanjutnya (untuk integrasi Go + React)
+## TODO
 
-- [ ] Port logika query ke Go (SQL tetap sama)
-- [ ] Buat React frontend untuk kasir
+- [ ] Port ke Go + React
 - [ ] Cari pasien (by nama, no_RM, no_rawat)
 - [ ] Info pasien di header billing
-- [ ] Proses pembayaran (input bayar, metode, kembalian)
+- [ ] Jenis pembayaran (Pelunasan/Deposit/Cicilan/Uang Muka)
+- [ ] Pembatalan/void pembayaran
 - [ ] Print struk/kwitansi
 - [ ] Autentikasi dan otorisasi kasir
 - [ ] Audit trail transaksi
@@ -219,3 +201,4 @@ console.log(data.grand_total);
 ## Lisensi
 
 ISC
+

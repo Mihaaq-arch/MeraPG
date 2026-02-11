@@ -284,26 +284,54 @@ async function fetchBillingItems(no_rawat) {
 }
 
 /**
- * Ambil data pembayaran yang sudah dilakukan dari mera_db.
- * Return Map: "nama_item|status|jenis" -> total_dibayar
+ * Ambil data pembayaran dari 2 sumber:
+ * 1. billing_payment (mera_db) — pembayaran via MeraPG (per item)
+ * 2. tagihan_sadewa (rsaz_sik) — pembayaran via SIMRS lama (total)
  */
 async function fetchPaidItems(no_rawat) {
-  const [rows] = await dbNew.execute(
-    `SELECT d.nama_item, d.status, d.jenis, SUM(d.total) as total_dibayar
-     FROM billing_payment_detail d
-     JOIN billing_payment p ON d.no_nota = p.no_nota
-     WHERE p.no_rawat = ?
-     GROUP BY d.nama_item, d.status, d.jenis`,
-    [no_rawat]
-  );
-  const map = {};
-  let totalPaid = 0;
-  for (const r of rows) {
-    const key = `${r.nama_item}|${r.status}|${r.jenis}`;
-    map[key] = Number(r.total_dibayar);
-    totalPaid += Number(r.total_dibayar);
+  // 1. Pembayaran baru dari mera_db
+  let paidMap = {};
+  let totalPaidNew = 0;
+  try {
+    const [rows] = await dbNew.execute(
+      `SELECT d.nama_item, d.status, d.jenis, SUM(d.total) as total_dibayar
+       FROM billing_payment_detail d
+       JOIN billing_payment p ON d.no_nota = p.no_nota
+       WHERE p.no_rawat = ?
+       GROUP BY d.nama_item, d.status, d.jenis`,
+      [no_rawat]
+    );
+    for (const r of rows) {
+      const key = `${r.nama_item}|${r.status}|${r.jenis}`;
+      paidMap[key] = Number(r.total_dibayar);
+      totalPaidNew += Number(r.total_dibayar);
+    }
+  } catch (e) {
+    // mera_db belum siap, lanjut saja
   }
-  return { paidMap: map, totalPaid };
+
+  // 2. Pembayaran lama dari tagihan_sadewa (rsaz_sik)
+  let legacyPaid = { found: false, totalBayar: 0, records: [] };
+  try {
+    const [legacyRows] = await db.execute(
+      `SELECT ts.no_nota, ts.tgl_bayar, ts.jenis_bayar, ts.jumlah_tagihan,
+              ts.jumlah_bayar, ts.status, ts.petugas
+       FROM tagihan_sadewa ts
+       WHERE ts.no_nota = ?
+       ORDER BY ts.tgl_bayar DESC`,
+      [no_rawat]
+    );
+    if (legacyRows.length > 0) {
+      legacyPaid.found = true;
+      legacyPaid.records = legacyRows;
+      legacyPaid.totalBayar = legacyRows.reduce((s, r) => s + Number(r.jumlah_bayar), 0);
+    }
+  } catch (e) {
+    // tagihan_sadewa tidak tersedia, lanjut saja
+  }
+
+  const totalPaid = totalPaidNew + legacyPaid.totalBayar;
+  return { paidMap, totalPaid, legacyPaid };
 }
 
 /**
@@ -345,7 +373,8 @@ function getOrderedStatuses(grouped) {
 /**
  * Render HTML billing lengkap dengan payment UI.
  */
-function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paidMap, totalPaid) {
+function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paidMap, totalPaid, legacyPaid) {
+  const isLegacyFullyPaid = legacyPaid.found && legacyPaid.totalBayar >= grand_total;
   let htmlContent = "";
   let itemIndex = 0;
 
@@ -375,7 +404,8 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paid
             <tbody>
               ${data.items.map(r => {
                 const key = `${r.nama_brng}|${r.status}|${r.jenis}`;
-                const isPaid = paidMap[key] >= Number(r.total);
+                const isPaid = isLegacyFullyPaid || paidMap[key] >= Number(r.total);
+                const paidVia = isLegacyFullyPaid ? 'SIMRS' : (paidMap[key] >= Number(r.total) ? 'MeraPG' : '');
                 const idx = itemIndex++;
                 const rowBg = isPaid ? 'background: #e8f5e9;' : '';
                 return `
@@ -395,7 +425,7 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paid
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: right;">${Number(r.total).toLocaleString()}</td>
                   <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">
                     ${isPaid
-                      ? '<span style="background:#198754; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600;">LUNAS</span>'
+                      ? `<span style="background:#198754; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600;">LUNAS${paidVia ? ' (' + paidVia + ')' : ''}</span>`
                       : '<span style="background:#ffc107; color:#333; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600;">BELUM</span>'
                     }
                   </td>
@@ -497,6 +527,19 @@ function renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paid
       </div>
 
       <h2>Billing: ${no_rawat}</h2>
+
+      ${legacyPaid.found ? `
+      <div style="padding: 12px 16px; margin-bottom: 16px; border-radius: 8px; background: #e8f5e9; border: 1px solid #4caf50; display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 22px;">✅</span>
+        <div>
+          <strong style="color: #2e7d32;">Sudah dibayar via SIMRS</strong><br/>
+          <span style="font-size: 13px; color: #555;">
+            Total: Rp ${legacyPaid.totalBayar.toLocaleString()}
+            ${legacyPaid.records.map(r => ` — ${r.jenis_bayar} (${r.no_nota}, ${r.petugas || '-'})`).join('')}
+          </span>
+        </div>
+      </div>
+      ` : ''}
 
       <div class="summary-bar">
         <div class="summary-item">
@@ -692,18 +735,18 @@ app.get("/billing", async (req, res) => {
 
   try {
     // Fetch billing + payment data in parallel
-    const [allItems, { paidMap, totalPaid }] = await Promise.all([
+    const [allItems, { paidMap, totalPaid, legacyPaid }] = await Promise.all([
       fetchBillingItems(no_rawat),
-      fetchPaidItems(no_rawat).catch(() => ({ paidMap: {}, totalPaid: 0 }))
+      fetchPaidItems(no_rawat).catch(() => ({ paidMap: {}, totalPaid: 0, legacyPaid: { found: false, totalBayar: 0, records: [] } }))
     ]);
     const { grouped, grand_total } = groupByStatus(allItems);
     const orderedStatuses = getOrderedStatuses(grouped);
 
-    const jsonResponse = { no_rawat, items: allItems, grand_total, totalPaid, sisa: grand_total - totalPaid };
+    const jsonResponse = { no_rawat, items: allItems, grand_total, totalPaid, sisa: grand_total - totalPaid, legacyPaid };
 
     // Tampilan HTML untuk browser
     if (req.headers.accept?.includes("text/html")) {
-      return res.send(renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paidMap, totalPaid));
+      return res.send(renderBillingHtml(no_rawat, grouped, orderedStatuses, grand_total, paidMap, totalPaid, legacyPaid));
     }
 
     // Response JSON untuk API
